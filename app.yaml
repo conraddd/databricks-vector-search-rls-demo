@@ -1,1 +1,8 @@
-command: ["uv", "run", "custom-mcp-server"]
+command: ["uv", "run", "vector-search-rls"]
+env:
+  - name: VS_INDEX_NAME
+    value: "conrad_demo_catalog.vs_rls_demo.messages_index"
+  - name: ACL_COLUMN
+    value: "acl_email"
+  - name: RETURN_COLUMNS
+    value: "id,sender,recipient,subject,topic,body,acl_email"

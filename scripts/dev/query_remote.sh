@@ -20,7 +20,7 @@ echo "✓ Using profile: $profile_name"
 echo ""
 
 # Step 2: Get Databricks App name
-read -p "Enter Databricks App name (e.g., mcp-hello-world): " app_name
+read -p "Enter Databricks App name (e.g., vector-search-rls-demo): " app_name
 if [ -z "$app_name" ]; then
     echo "❌ Error: App name is required"
     exit 1

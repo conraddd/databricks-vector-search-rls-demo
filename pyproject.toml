@@ -4,9 +4,9 @@
 # This section defines the basic information about your MCP server package
 
 [project]
-name = "custom-mcp-server"                            # Change this to your server's name
-version = "0.1.0"                                     
-description = "Custom MCP Server on Databricks Apps" 
+name = "vector-search-rls-demo"
+version = "0.1.0"
+description = "Custom MCP server adding row-level security to Databricks Vector Search"
 readme = "README.md"                                  
 requires-python = ">=3.11"                            
 
@@ -32,11 +32,10 @@ dev = [
 # ============================================================================
 # Command Line Scripts
 # ============================================================================
-# This creates the 'custom-mcp-server' command that runs your server
-# Change the command name if you rename your project
+# This creates the 'vector-search-rls' command that runs your server
 
 [project.scripts]
-custom-mcp-server = "server.main:main"
+vector-search-rls = "server.main:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -1,3 +1,3 @@
 version: 1
-name: "MCP Server - Hello World"
-description: "A basic MCP server."
+name: "Vector Search RLS MCP Server"
+description: "Custom MCP server that adds row-level security to Databricks Vector Search."

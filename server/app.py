@@ -23,7 +23,7 @@ from fastmcp import FastMCP
 from .tools import load_tools
 from .utils import header_store
 
-mcp_server = FastMCP(name="custom-mcp-server")
+mcp_server = FastMCP(name="vector-search-rls")
 
 STATIC_DIR = Path(__file__).parent / "../static"
 
@@ -42,8 +42,8 @@ mcp_app = mcp_server.http_app()
 # Create a separate FastAPI instance for additional API endpoints
 # This allows you to add custom routes alongside the MCP endpoints
 app = FastAPI(
-    title="Custom MCP Server",
-    description="Custom MCP Server for the app",
+    title="Vector Search RLS MCP Server",
+    description="Custom MCP server adding row-level security to Databricks Vector Search",
     version="0.1.0",
     lifespan=mcp_app.lifespan,  # Share the lifespan context with MCP app
 )
@@ -55,7 +55,7 @@ async def serve_index():
     if STATIC_DIR.exists() and (STATIC_DIR / "index.html").exists():
         return FileResponse(STATIC_DIR / "index.html")
     else:
-        return {"message": "Custom Open API Spec MCP Server is running", "status": "healthy"}
+        return {"message": "Vector Search RLS MCP Server is running", "status": "healthy"}
 
 
 # Create the final application by combining MCP routes with custom API routes

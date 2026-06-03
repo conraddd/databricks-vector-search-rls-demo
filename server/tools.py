@@ -12,7 +12,40 @@ Each tool should:
 - Handle errors gracefully
 """
 
+import json
+import os
+
+from databricks.sdk.errors import NotFound, PermissionDenied
+from fastmcp.exceptions import ToolError
+
 from server import utils
+
+# Vector Search RLS configuration (overridable via app.yaml env vars).
+VS_INDEX_NAME = os.environ.get(
+    "VS_INDEX_NAME", "conrad_demo_catalog.vs_rls_demo.messages_index"
+)
+ACL_COLUMN = os.environ.get("ACL_COLUMN", "acl_email")
+RETURN_COLUMNS = [
+    c.strip()
+    for c in os.environ.get(
+        "RETURN_COLUMNS", "id,sender,recipient,subject,topic,body,acl_email"
+    ).split(",")
+    if c.strip()
+]
+NUM_RESULTS = int(os.environ.get("NUM_RESULTS", "5"))
+
+# Mirror the native Databricks-managed Vector Search MCP server's tool name and
+# description so this custom server is a drop-in replacement. The native server
+# names the tool after the fully qualified index name with dots replaced by "__"
+# and takes a single `query` argument; num_results/columns/filters are
+# server-side config (here, the filter is injected from the caller's identity).
+TOOL_NAME = VS_INDEX_NAME.replace(".", "__")
+TOOL_DESCRIPTION = (
+    "A vector search-based retrieval tool for querying indexed embeddings "
+    f"using vector index {VS_INDEX_NAME}. "
+    "Row-level security is enforced: results are automatically filtered to only "
+    "the rows the calling user is authorized to see, based on their identity."
+)
 
 
 def load_tools(mcp_server):
@@ -35,33 +68,6 @@ def load_tools(mcp_server):
             '''Description of what the tool does.'''
             return {"result": f"Processed {param}"}
     """
-
-    @mcp_server.tool
-    def health() -> dict:
-        """
-        Check the health of the MCP server and Databricks connection.
-
-        This is a simple diagnostic tool that confirms the server is running properly.
-        It's useful for:
-        - Monitoring and health checks
-        - Testing the MCP connection
-        - Verifying the server is responsive
-
-        Returns:
-            dict: A dictionary containing:
-                - status (str): The health status ("healthy" if operational)
-                - message (str): A human-readable status message
-
-        Example response:
-            {
-                "status": "healthy",
-                "message": "Custom MCP Server is healthy and connected to Databricks Apps."
-            }
-        """
-        return {
-            "status": "healthy",
-            "message": "Custom MCP Server is healthy and connected to Databricks Apps.",
-        }
 
     @mcp_server.tool
     def get_current_user() -> dict:
@@ -106,6 +112,54 @@ def load_tools(mcp_server):
         except Exception as e:
             return {"error": str(e), "message": "Failed to retrieve user information"}
 
-    """
-    TODO: Add more tools as necessary
-    """
+    @mcp_server.tool(name=TOOL_NAME, description=TOOL_DESCRIPTION)
+    def query_vector_index(query: str) -> list[dict]:
+        """
+        Query the Vector Search index with row-level security (RLS).
+
+        Drop-in replacement for the native Databricks Vector Search MCP tool:
+        same tool name, description, and single `query` argument. The difference
+        is RLS, enforced two ways:
+          1. The query runs on-behalf-of the calling user (their forwarded OAuth
+             token), so Unity Catalog gates access to the index itself.
+          2. Results are filtered to rows whose ACL column equals the caller's
+             identity -- the row-level security, since Databricks Vector Search
+             has no native RLS. num_results/columns are server-side config.
+
+        Args:
+            query: The query string to search the vector index.
+
+        Returns:
+            A list of matching rows (column name -> value, plus a relevance
+            "score"), matching the native VS MCP server's output shape.
+        """
+        # Resolve the caller from their forwarded OAuth token (OBO). A missing
+        # token raises ValueError in utils; we let it surface as a tool error
+        # rather than masking it.
+        w = utils.get_user_authenticated_workspace_client()
+        caller = w.current_user.me().user_name
+
+        # Row-level security: restrict results to rows owned by the caller.
+        filters = {ACL_COLUMN: caller}
+
+        try:
+            resp = w.vector_search_indexes.query_index(
+                index_name=VS_INDEX_NAME,
+                columns=RETURN_COLUMNS,
+                query_text=query,
+                num_results=NUM_RESULTS,
+                filters_json=json.dumps(filters),
+            )
+        except PermissionDenied as e:
+            # Caller lacks UC access to the index (the index-level gate).
+            raise ToolError(
+                f"{caller} is not authorized to query index {VS_INDEX_NAME}."
+            ) from e
+        except NotFound as e:
+            raise ToolError(f"Vector Search index {VS_INDEX_NAME} was not found.") from e
+
+        # Match the native VS MCP server's output: a list of row objects
+        # (column name -> value, plus a relevance "score").
+        cols = [c.name for c in (resp.manifest.columns if resp.manifest else [])]
+        data = (resp.result.data_array if resp.result else None) or []
+        return [dict(zip(cols, row)) for row in data]

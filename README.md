@@ -1,367 +1,209 @@
-# MCP Server - Hello World
+# Vector Search RLS MCP Server
 
-A simple, production-ready template for building Model Context Protocol (MCP) servers using FastMCP and FastAPI. This project demonstrates how to create custom tools that AI assistants can discover and invoke.
+A custom [Model Context Protocol](https://modelcontextprotocol.io) server, deployed as a
+[Databricks App](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/), that adds
+**row-level security (RLS)** to a Databricks Vector Search index.
 
-### Key Concepts
+> Built from the Databricks
+> [`mcp-server-hello-world`](https://github.com/databricks/app-templates/tree/main/mcp-server-hello-world)
+> app template, then extended with the RLS-aware search tool and the data/index setup below.
 
-- **Tools**: Callable functions that AI assistants can invoke (e.g., search databases, process data, call APIs)
-- **Server**: Exposes tools via the MCP protocol over HTTP
-- **Client**: Applications (like Claude, AI assistants) that discover and call tools
+## Why this exists
 
-## Features
+Databricks Vector Search has **no native row-level security** — access to an index is
+all-or-nothing. The Databricks *managed* Vector Search MCP server inherits that limitation:
+if a user can query an index, it returns **every** matching row regardless of who is asking.
 
-- ✅ FastMCP-based server with HTTP streaming support
-- ✅ FastAPI integration for additional REST endpoints
-- ✅ Example tools: health check and user information
-- ✅ Production-ready project structure
-- ✅ Ready for Databricks Apps deployment
+This server is a **drop-in replacement** for the managed VS MCP tool (same tool name,
+description, and single `query` argument) that transparently enforces RLS:
 
-## Project Structure
+1. **Index-level gate** — the query runs *on behalf of the calling user* (their forwarded
+   OAuth token), so Unity Catalog still governs who can touch the index at all.
+2. **Row-level gate** — results are filtered to rows whose ACL column (`acl_email`) matches
+   the caller's identity. This is the RLS layer Vector Search lacks.
+
+Because the filter value comes from the platform-injected `x-forwarded-access-token` (not a
+tool argument), a caller cannot spoof their way past it.
+
+## How it works
 
 ```
-mcp-server-hello-world/
-├── server/
-│   ├── app.py                    # FastAPI application and MCP server setup
-│   ├── main.py                   # Entry point for running the server
-│   ├── tools.py                  # MCP tool definitions
-│   └── utils.py                  # Databricks authentication helpers
-├── scripts/
-│   └── dev/
-│       ├── start_server.sh           # Start the MCP server locally
-│       ├── query_remote.sh           # Interactive script for testing deployed app with OAuth
-│       ├── query_remote.py           # Query MCP client (deployed app) with health and user auth
-│       └── generate_oauth_token.py   # Generate OAuth tokens for Databricks
-├── tests/
-│   └── test_integration_server.py   # Integration tests for MCP server
-├── pyproject.toml                # Project metadata and dependencies
-├── requirements.txt              # Python dependencies (for pip)
-├── app.yaml                      # Databricks Apps configuration
-├── Claude.md                     # AI assistant context and documentation
-└── README.md
-```
-
-## Prerequisites
-
-- Python 3.11 or higher
-- [uv](https://github.com/astral-sh/uv) (recommended) or pip
-
-## Installation
-
-### Option 1: Using uv (Recommended)
-
-```bash
-# Install uv if you haven't already
-# Install dependencies
-uv sync
-```
-
-### Option 2: Using pip
-
-```bash
-# Create a virtual environment
-python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-```
-
-## Running the Server
-
-### Development Mode
-
-```bash
-# Quick start with script (syncs dependencies and starts server)
-./scripts/dev/start_server.sh
-
-# Or manually using uv (default port 8000)
-uv run custom-mcp-server
-
-# Or specify a custom port
-uv run custom-mcp-server --port 8080
-
-# Or using the installed command (after pip install -e .)
-custom-mcp-server --port 3000
-```
-
-The server will start on `http://localhost:8000` by default (or your specified port).
-
-### Accessing the Server
-
-- **MCP Endpoints**: `http://localhost:8000/mcp`
-- **Available Tools**:
-    - `health`: Check server status
-    - `get_current_user`: Get authenticated user information
-
-## Testing the MCP Server
-
-This project includes test scripts to verify your MCP server is working correctly in both local and deployed environments.
-
-### Integration Tests
-
-The project includes automated integration tests that validate the MCP server functionality:
-
-```bash
-# Run integration tests
-uv run pytest tests/
-```
-
-**What the tests do:**
-
-- Automatically start the MCP server
-- Test that `list_tools()` works correctly
-- Test that all registered tools can be called without errors by invoking the `call_tools()`
-- Automatically clean up the server after tests complete
-
-### Manual Testing
-
-#### End-to-end test your locally-running MCP server
-
-```bash
-./scripts/dev/start_server.sh
-```
-
-```python
-from databricks_mcp import DatabricksMCPClient
-mcp_client = DatabricksMCPClient(
-    server_url="http://localhost:8000/mcp"
+Client (Copilot / Playground / agent)
+        │  OAuth  ─ tool: <catalog>__<schema>__<index>(query)
+        ▼
+Databricks App (this MCP server, /mcp)
+        │  get_user_authenticated_workspace_client()  ← x-forwarded-access-token (OBO)
+        │  caller = current_user.me().user_name
+        ▼
+vector_search_indexes.query_index(
+    query_text=query,
+    filters_json={"acl_email": caller}   ← row-level security
 )
-# List available MCP tools
-print(mcp_client.list_tools())
 ```
 
-The script connects to your local MCP server without authentication and lists available tools.
+## Tool schema
 
-#### End-to-end test your deployed MCP server
+The server exposes one search tool. Its name is derived from the index (`VS_INDEX_NAME` with
+dots replaced by `__`), e.g. `conrad_demo_catalog__vs_rls_demo__messages_index`.
 
-After deploying to Databricks Apps, use the interactive shell script to test with user-level OAuth authentication:
+**Input** (identical to the native VS MCP tool):
 
-```bash
-chmod +x scripts/dev/query_remote.sh
-./scripts/dev/query_remote.sh
+```json
+{
+  "type": "object",
+  "required": ["query"],
+  "properties": {
+    "query": { "type": "string", "description": "The query string to search the vector index" }
+  }
+}
 ```
 
-The script will guide you through:
+`num_results`, `columns`, and the RLS filter are server-side (env config / the caller's
+identity), not caller arguments.
 
-1. **Profile selection**: Choose your Databricks CLI profile
-2. **App name**: Enter your deployed app name
-3. **Automatic configuration**: Extracts app scopes and URLs automatically
-4. **OAuth flow**: Generates user OAuth token via browser
-5. **End-to-end test**: Tests `list_tools()`, and invokes each tool returned in list_tools
+**Output** — a JSON array of matching rows, each returned column plus a relevance `score`:
 
-**What it does:**
-
-- Retrieves app configuration using `databricks apps get`
-- Extracts user authorization scopes from `effective_user_api_scopes`
-- Gets workspace host from your Databricks profile
-- Generates OAuth token with the correct scopes
-- Tests MCP client with user-level authentication
-- Verifies both the `health` check and `get_current_user` tool work correctly
-
-This test simulates the real end-user experience when they authorize your app and use it with their credentials.
-
-Alternatively, test manually with command-line arguments:
-
-```bash
-python scripts/dev/query_remote.py \
-    --host "https://your-workspace.cloud.databricks.com" \
-    --token "eyJr...Dkag" \
-    --app-url "https://your-workspace.cloud.databricks.com/serving-endpoints/your-app"
+```json
+[
+  {
+    "id": "msg-0224",
+    "sender": "dana.cole@example.com",
+    "recipient": "conrad.ho@databricks.com",
+    "subject": "Q1 budget review for the analytics team",
+    "topic": "quarterly budget",
+    "body": "Please find attached the analytics spend forecast ...",
+    "acl_email": "conrad.ho@databricks.com",
+    "score": 0.6514
+  }
+]
 ```
 
-The `scripts/dev/query_remote.py` script connects to your deployed MCP server with OAuth authentication and tests both the health check and user authorization functionality.
+### How it differs from the native Vector Search MCP server
 
-## Adding New Tools
+| Aspect | Native managed VS MCP tool | This server |
+|---|---|---|
+| Tool name | `<catalog>__<schema>__<index>` | identical |
+| Input schema | `{ query: string }` | identical |
+| Output shape | array of row objects + `score` | identical |
+| Description | "A vector search-based retrieval tool …" | same, plus a note that RLS is applied |
+| Rows returned | every matching row in the index | only rows where `acl_email` = caller |
+| Net effect | results leak across users (no RLS) | row-level security enforced |
 
-To add a new tool to your MCP server:
+Same name, same input, same output shape — a client can repoint from the managed MCP URL to
+this app's `/mcp` and call the exact same tool. The only behavioral change is that results are
+scoped to the caller.
 
-1. Open `server/tools.py`
-2. Add a new function inside `load_tools()` with the `@mcp_server.tool` decorator:
+## Project structure
 
-```python
-@mcp_server.tool
-def calculate_sum(a: int, b: int) -> dict:
-    """
-    Calculate the sum of two numbers.
-
-    Args:
-        a: First number
-        b: Second number
-
-    Returns:
-        dict: Contains the sum result
-    """
-    return {"result": a + b}
 ```
-
-3. Restart the server - the new tool will be automatically available to clients
-
-### Tool Best Practices
-
-- **Clear naming**: Use descriptive, action-oriented names
-- **Comprehensive docstrings**: AI uses these to understand when to call your tool
-- **Type hints**: Help with validation and documentation
-- **Structured returns**: Return dicts or Pydantic models for consistent data
-- **Error handling**: Use try-except blocks and return error information
-
-### Connecting to Databricks
-
-The `utils.py` module provides two helper methods for interacting with Databricks resources via the Databricks SDK Workspace Client:
-
-**When deployed as a Databricks App:**
-
-- `get_workspace_client()` - Returns a client authenticated as the service principal associated with the app. See [App Authorization](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/auth#app-authorization) for more details.
-- `get_user_authenticated_workspace_client()` - Returns a client authenticated as the end user with scopes specified by the app creator. See [User Authorization](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/auth#user-authorization) for more details.
-
-**When running locally:**
-
-- Both methods return a client authenticated as the current developer, since no service principal identity exists in the local environment.
-
-**Example usage in tools:**
-
-```python
-from server import utils
-
-# Get current user information (user-authenticated)
-w = utils.get_user_authenticated_workspace_client()
-user = w.current_user.me()
-display_name = user.display_name
-```
-
-See the `get_current_user` tool in `server/tools.py` for a complete example.
-
-## Generating OAuth Tokens
-
-For advanced use cases, you can manually generate OAuth tokens for Databricks workspace access using the provided script. This implements the [OAuth U2M (User-to-Machine) flow](https://docs.databricks.com/aws/en/dev-tools/auth/oauth-u2m?language=CLI).
-
-### Generate Workspace-Level OAuth Token
-
-```bash
-python scripts/dev/generate_oauth_token.py \
-    --host https://your-workspace.cloud.databricks.com \
-    --scopes "all-apis offline_access"
-```
-
-**Parameters:**
-
-- `--host`: Databricks workspace URL (required)
-- `--scopes`: Space-separated OAuth scopes (default: `all-apis offline_access`)
-- `--redirect-uri`: Callback URI (default: `http://localhost:8020`)
-
-**Note:** The script uses the `databricks-cli` OAuth client ID by default.
-
-**The script will:**
-
-1. Generate a PKCE code verifier and challenge
-2. Open your browser for authorization
-3. Capture the authorization code via local HTTP server
-4. Exchange the code for an access token
-5. Display the token response as JSON (token is valid for 1 hour)
-
-**Example with custom scopes:**
-
-```bash
-python scripts/dev/generate_oauth_token.py \
-    --host https://your-workspace.cloud.databricks.com \
-    --scopes "clusters:read jobs:write sql:read"
+server/
+├── app.py     # FastAPI + FastMCP wiring, header-capture middleware (do not edit middleware)
+├── main.py    # uvicorn entry point (the `vector-search-rls` command)
+├── tools.py   # the query_vector_index tool (RLS) + get_current_user
+└── utils.py   # OBO auth helper (reads x-forwarded-access-token)
+setup/
+└── generate_emails.py   # re-runnable synthetic data generator (configurable owners)
+app.yaml       # Databricks App run command + VS_* env config
 ```
 
 ## Configuration
 
-### Server Settings
+The tool reads these from `app.yaml` `env` (overridable without code changes):
 
-The server can be configured using command-line arguments:
+| Env var | Default | Meaning |
+|---|---|---|
+| `VS_INDEX_NAME` | `conrad_demo_catalog.vs_rls_demo.messages_index` | Index to query; also derives the tool name (dots → `__`) |
+| `ACL_COLUMN` | `acl_email` | Column filtered against the caller's identity |
+| `RETURN_COLUMNS` | `id,sender,recipient,subject,topic,body,acl_email` | Columns returned per row |
+| `NUM_RESULTS` | `5` | Max rows returned |
 
-```bash
-# Change port
-uv run custom-mcp-server --port 8080
+## Setup (data + index)
 
-# Get help
-uv run custom-mcp-server --help
-```
-
-The default configuration:
-
-- **Host**: `0.0.0.0` (listens on all network interfaces)
-- **Port**: `8000` (configurable via `--port` argument)
-
-## Deployment
-
-### Databricks Apps
-
-This project is configured for Databricks Apps deployment:
-
-1. Deploy using Databricks CLI or UI
-2. The server will be accessible at your Databricks app URL
-
-For more information refer to the documentation [here](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/deploy#deploy-the-app)
-
-### Try Your MCP Server in AI Playground
-
-After deploying your MCP server to Databricks Apps, you can test it interactively in the Databricks AI Playground:
-
-1. Navigate to the **AI Playground** in your Databricks workspace
-2. Select a model with the **Tools enabled** label
-3. Click **Tools > + Add tool** and select your deployed MCP server
-4. Start chatting with the AI agent - it will automatically call your MCP server's tools as needed
-
-The AI Playground provides a visual interface to prototype and test your MCP server with different models and configurations before integrating it into production applications.
-
-For more information, see [Prototype tool-calling agents in AI Playground](https://docs.databricks.com/aws/en/generative-ai/agent-framework/ai-playground-agent).
-
-## Development
-
-### Code Formatting
+The demo data and index live in Unity Catalog. To (re)build them:
 
 ```bash
-# Format code with ruff
-uv run ruff format .
+# 1. Generate synthetic emails (edit OWNER_EMAILS in the script first)
+python setup/generate_emails.py --out /tmp/emails.csv
 
-# Check for lint errors
-uv run ruff check .
+# 2. Upload + load into a CDF-enabled Delta table, then create the Delta-Sync index
+#    with Databricks-computed embeddings (databricks-gte-large-en) and acl_email as a
+#    filterable column. Adapt the catalog.schema to your workspace.
 ```
 
-## Customization
+Each owner in `OWNER_EMAILS` **must be a real Databricks identity** that will call the
+agent (OBO) — otherwise their filtered searches return nothing.
 
-### Rename the Project
+### Why a Delta-Sync index with managed embeddings
 
-1. Update `name` in `pyproject.toml`
-2. Update `name` parameter in `server/app.py`: `FastMCP(name="your-name")`
-3. Update the command script in `pyproject.toml` under `[project.scripts]`
+- **Delta-Sync index** — the index stays automatically in sync with the source Delta table.
+  When you re-run the generator (e.g. add an owner or change ACL assignments), the new rows —
+  including the `acl_email` column the RLS filter depends on — flow into the index without any
+  manual re-embedding or upserts. A Direct-Access index would make us manage vectors and CRUD
+  ourselves; Delta-Sync keeps the table as the single source of truth.
+- **Managed (Databricks-computed) embeddings** — Databricks embeds the `body` text with a
+  Foundation Model endpoint (`databricks-gte-large-en`) at sync time, and embeds the incoming
+  query at query time. So the tool just passes `query_text` (no client-side vectorization),
+  and we don't host an embedding model or attach an embedding serving endpoint as an app
+  resource. Self-managed embeddings would require computing and storing vectors ourselves.
 
-### Add Custom API Endpoints
+## Run locally
 
-Add routes to the `app` FastAPI instance in `server/app.py`:
-
-```python
-@app.get("/custom-endpoint")
-def custom_endpoint():
-    return {"message": "Hello from custom endpoint"}
+```bash
+./scripts/dev/start_server.sh        # serves http://localhost:8000/mcp
 ```
+Locally, OBO falls back to your developer identity, so searches return *your* rows.
+
+## Deploy
+
+```bash
+databricks sync . /Workspace/Users/<you>/vector-search-rls-demo --profile <profile>
+databricks apps deploy vector-search-rls-demo \
+  --source-code-path /Workspace/Users/<you>/vector-search-rls-demo --profile <profile>
+```
+
+The app must be configured with **user authorization** scopes
+(`vectorsearch.vector-search-indexes`, `vectorsearch.vector-search-endpoints`,
+`iam.current-user:read`) and the calling users need `USE CATALOG` / `USE SCHEMA` / `SELECT`
+on the index.
+
+## Test
+
+```bash
+# OAuth token (must be U2M; PATs are not accepted by MCP)
+TOK=$(databricks auth token --profile <profile> | jq -r .access_token)
+
+# Initialize handshake
+curl -s -X POST "https://<app-url>/mcp" \
+  -H "Authorization: Bearer $TOK" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"1.0"}}}'
+```
+
+Or point **MCP Inspector** (`npx @modelcontextprotocol/inspector`) at `https://<app-url>/mcp`
+with transport **Streamable HTTP** and the bearer token, or add the app as a tool in the
+Databricks **AI Playground**.
+
+**Proving RLS:** call the tool as two different users — each gets only their own rows,
+whereas the native managed VS MCP tool returns everyone's.
 
 ## Troubleshooting
 
-### Port Already in Use
+- **401 from the app** — the bearer token must be a workspace OAuth (U2M) token with app
+  access. A broad token from `databricks auth token` works; a narrowly resource-scoped token
+  is rejected at the ingress. PATs are not accepted by MCP.
+- **Token expired** — tokens last ~1 hour. Re-mint with `databricks auth token`. MCP Inspector
+  holds a static snapshot, so re-paste after re-minting.
+- **MCP Inspector "proxy token" error** — that's Inspector's own local session token
+  (`MCP_PROXY_AUTH_TOKEN`), separate from your Databricks token. Open Inspector via the
+  console URL it prints (it includes the proxy token).
+- **Search returns nothing** — the caller's identity has no rows whose `acl_email` matches it,
+  or the caller lacks `SELECT` on the index. The OBO query scopes
+  (`vectorsearch.vector-search-indexes`, `vectorsearch.vector-search-endpoints`) come from the
+  app's configured user-authorization scopes, not the token you present.
 
-Change the port in `server/main.py` or set the `PORT` environment variable.
-
-### Import Errors
-
-Ensure all dependencies are installed:
+## Integration tests
 
 ```bash
-uv sync  # or pip install -r requirements.txt
+uv run pytest tests/
 ```
-
-## Resources
-
-- [Databricks MCP Documentation](https://docs.databricks.com/aws/en/generative-ai/mcp/custom-mcp)
-- [Databricks Apps](https://www.databricks.com/product/databricks-apps)
-- [FastMCP Documentation](https://github.com/jlowin/fastmcp)
-- [Model Context Protocol Specification](https://modelcontextprotocol.io)
-- [FastAPI Documentation](https://fastapi.tiangolo.com)
-- [Uvicorn Documentation](https://www.uvicorn.org)
-
-## AI Assistant Context
-
-See [`Claude.md`](./Claude.md) for detailed project context specifically designed for AI assistants working with this codebase.

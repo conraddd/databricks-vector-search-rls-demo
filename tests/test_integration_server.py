@@ -39,7 +39,7 @@ def run_mcp_server():
     host = "127.0.0.1"
     port = _find_free_port()
     url = f"http://{host}:{port}"
-    cmd = shlex.split(f"uv run custom-mcp-server --port {port}")
+    cmd = shlex.split(f"uv run vector-search-rls --port {port}")
 
     # Start the process
     proc = subprocess.Popen(
@@ -82,5 +82,13 @@ def test_call_tools(run_mcp_server):
     mcp_client = DatabricksMCPClient(server_url=f"{url}/mcp")
     tools = mcp_client.list_tools()
     for tool in tools:
-        result = mcp_client.call_tool(tool.name)
+        # Build minimal args from the tool's input schema so tools that require
+        # a `query` (e.g. the vector index tool) are called correctly. The tool
+        # name is derived from the index name, so key off the schema, not name.
+        schema = getattr(tool, "inputSchema", None) or {}
+        props = schema.get("properties", {}) or {}
+        args = {}
+        if "query" in props:
+            args["query"] = "quarterly budget"
+        result = mcp_client.call_tool(tool.name, args)
         assert result is not None
