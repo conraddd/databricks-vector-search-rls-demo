@@ -122,16 +122,20 @@ The tool reads these from `app.yaml` `env` (overridable without code changes):
 The demo data and index live in Unity Catalog. To (re)build them:
 
 ```bash
-# 1. Generate synthetic emails (edit OWNER_EMAILS in the script first)
-python setup/generate_emails.py --out /tmp/emails.csv
+# 1. Generate synthetic emails. Pass the demo owners via --owners (or the
+#    DEMO_OWNER_EMAILS env var); they are not hard-coded in the script.
+python setup/generate_emails.py \
+  --owners "alice@yourco.com,bob@yourco.com" --out /tmp/emails.csv
 
 # 2. Upload + load into a CDF-enabled Delta table, then create the Delta-Sync index
 #    with Databricks-computed embeddings (databricks-gte-large-en) and acl_email as a
 #    filterable column. Adapt the catalog.schema to your workspace.
 ```
 
-Each owner in `OWNER_EMAILS` **must be a real Databricks identity** that will call the
-agent (OBO) — otherwise their filtered searches return nothing.
+Each owner you pass (via `--owners` or `DEMO_OWNER_EMAILS`) **must be a real Databricks
+identity** that will call the agent (OBO) — otherwise their filtered searches return
+nothing. The generator creates one email per theme per owner, so every theme has a
+matching pair across owners (which is what makes the RLS difference visible).
 
 ### Why a Delta-Sync index with managed embeddings
 
